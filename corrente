@@ -1,0 +1,223 @@
+import numpy as np
+from numpy import pi
+import matplotlib.pyplot as plt
+
+
+#  Constantes físicas
+kB = 8.617333262e-5   # eV/K
+T  = 10.0             # Kelvin (Fig 5.7)
+beta = 1/(kB*T)
+
+
+#  Parâmetros da Tabela 5.1  (Fig 5.7)
+
+eps_L = 0.0
+eps_M0 = 1.0
+eps_R = 0.0
+
+t_L  = 5.0
+t_R  = 5.0
+t_ML = 0.1
+t_MR = 0.1
+
+gamma_probe = 0.05    # dephasing gamma_P
+
+U0 = 0.0              # Hartree (0.0 ou 1.0 depois)
+
+
+#  Discretização de energia
+
+
+Emin, Emax = -10.0, 10.0
+NE = 2500
+Egrid = np.linspace(Emin, Emax, NE)
+dE = Egrid[1]-Egrid[0]
+
+eta = 1e-9
+
+
+#  Funções auxiliares
+
+
+def fermi(E, mu):
+    x = beta*(E-mu)
+    x = np.clip(x, -200, 200)     # estabilidade numérica
+    return 1.0/(1.0 + np.exp(x))
+
+
+def self_energy_1D(E, eps, t, tc):
+    """
+    Autoenergia de uma cadeia 1D semi-infinita
+    """
+    z = (E-eps)/(2*t)
+    z = np.clip(z, -1.0, 1.0)
+    k = np.arccos(z)
+    Sigma = (tc**2/t) * np.exp(-1j*k)
+    return Sigma
+
+
+def Gamma_from_Sigma(S):
+    return -2*np.imag(S)
+
+
+
+#  Green function
+
+
+def Green(E, eps_eff):
+    SL = self_energy_1D(E, eps_L, t_L, t_ML)
+    SR = self_energy_1D(E, eps_R, t_R, t_MR)
+    SP = -1j*gamma_probe/2
+
+    Sigma = SL + SR + SP
+    G = 1.0/(E - eps_eff - Sigma + 1j*eta)
+
+    return G, SL, SR
+
+
+
+#  Corrente no probe (condição IP = 0)
+
+def probe_current(muP, muL, muR, eps_eff):
+
+    Ip = 0.0
+
+    for E in Egrid:
+
+        G, SL, SR = Green(E, eps_eff)
+
+        GL = Gamma_from_Sigma(SL)
+        GR = Gamma_from_Sigma(SR)
+        GP = gamma_probe
+
+        fL = fermi(E, muL)
+        fR = fermi(E, muR)
+        fP = fermi(E, muP)
+
+        TPL = GP * GL * abs(G)**2
+        TPR = GP * GR * abs(G)**2
+
+        Ip += (TPL*(fP-fL) + TPR*(fP-fR)) * dE
+
+    return Ip
+
+
+
+#  Solver de muP (bisseção estável)
+
+
+def solve_muP(muL, muR, eps_eff):
+
+    mu_min = muR - 2.0
+    mu_max = muL + 2.0
+
+    for _ in range(60):
+
+        mu_mid = 0.5*(mu_min + mu_max)
+        I_mid = probe_current(mu_mid, muL, muR, eps_eff)
+
+        if I_mid > 0:
+            mu_max = mu_mid
+        else:
+            mu_min = mu_mid
+
+    return 0.5*(mu_min + mu_max)
+
+
+
+#  Ocupação (para Hartree depois)
+
+def occupation(muL, muR, muP, eps_eff):
+
+    n = 0.0
+
+    for E in Egrid:
+
+        G, SL, SR = Green(E, eps_eff)
+
+        GL = Gamma_from_Sigma(SL)
+        GR = Gamma_from_Sigma(SR)
+        GP = gamma_probe
+
+        fL = fermi(E, muL)
+        fR = fermi(E, muR)
+        fP = fermi(E, muP)
+
+        A = abs(G)**2 * (GL*fL + GR*fR + GP*fP)
+        n += A * dE/(2*pi)
+
+    return n
+
+
+
+#  Loop em tensão
+
+
+Vlist = np.linspace(0, 5.0, 60)
+
+I_list = []
+muP_list = []
+eps_list = []
+
+n0 = 0.0      # referência Hartree
+eps_eff = eps_M0
+
+for V in Vlist:
+
+    muL = +V/2
+    muR = -V/2
+
+   
+    muP = solve_muP(muL, muR, eps_eff)
+
+    
+    I = 0.0
+    for E in Egrid:
+
+        G, SL, SR = Green(E, eps_eff)
+
+        GL = Gamma_from_Sigma(SL)
+        GR = Gamma_from_Sigma(SR)
+
+        fL = fermi(E, muL)
+        fR = fermi(E, muR)
+
+        TLR = GL*GR*abs(G)**2
+        I += TLR*(fL-fR)*dE
+
+   
+    n = occupation(muL, muR, muP, eps_eff)
+    eps_eff = eps_M0 + U0*(n - n0)
+
+   
+    I_list.append(I)
+    muP_list.append(muP)
+    eps_list.append(eps_eff)
+
+    print(f"V={V:.2f} | I={I:.4e} | muP={muP:.3f} | eps={eps_eff:.3f}")
+
+
+
+#  Plots
+
+
+plt.figure(figsize=(7,5))
+plt.plot(Vlist, I_list)
+plt.xlabel("Bias V (eV)")
+plt.ylabel("Current (arb. units)")
+plt.title("I–V (Probe inelástico)")
+plt.grid()
+plt.show()
+
+
+plt.figure(figsize=(7,5))
+plt.plot(Vlist, muP_list, label=r"$\mu_P$")
+plt.plot(Vlist, +Vlist/2, "--", label=r"$\mu_L$")
+plt.plot(Vlist, -Vlist/2, "--", label=r"$\mu_R$")
+plt.plot(Vlist, eps_list, label=r"$\epsilon_M$")
+plt.legend()
+plt.xlabel("Bias V (eV)")
+plt.ylabel("Energy (eV)")
+plt.title("Potenciais e nível do sítio")
+plt.grid()
+plt.show()
